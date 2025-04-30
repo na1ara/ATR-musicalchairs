@@ -47,42 +47,55 @@ public:
 
     void iniciar_rodada(int jogadores_ativos){
         // TODO: Inicia uma nova rodada, removendo uma cadeira e ressincronizando o semáforo
-
         cadeiras--;
-        numero_cadeira = 1;
-        while (cadeira_sem.try_acquire())
-            ;
+        numero_cadeira = 1;  // Reinicia a contagem de cadeiras ocupadas
+        
+        for (bool drenando = true; drenando; ) {
+            if (!cadeira_sem.try_acquire()) drenando = false;
+        }
+        
         cadeira_sem.release(cadeiras);
-        musica_parada.store(false);
+        musica_parada.store(false); // Nova rodada
 
         if (jogadores_ativos > 1){
-            std::cout << "\nPróxima rodada com " << jogadores_ativos << " jogadores e " << cadeiras << " cadeiras.\n";
-            std::cout << "A música está tocando... 🎵\n\n";
+            std::cout << "\nPróxima rodada com " << jogadores_ativos << " jogadores e " << cadeiras << " cadeiras.\n" << "A música está tocando... 🎵\n\n";
         }
     }
 
     void parar_musica(){
         // TODO: Simula o momento em que a música para e notifica os jogadores via variável de condição
 
-        std::unique_lock<std::mutex> lock(music_mutex);
-        musica_parada.store(true);
-        music_cv.notify_all();
-        std::cout << "> A música parou! Os jogadores estão tentando se sentar...\n\n";
-        std::cout << "----------------------------------------------------------\n";
+        { // bloqueio atomico
+            std::unique_lock<std::mutex> lock(music_mutex);
+            musica_parada.store(true, std::memory_order_release);
+        }
+        
+        music_cv.notify_all(); //avisa que a musica parou
+        std::cout << "> A música parou! Os jogadores estão tentando se sentar...\n\n" << "----------------------------------------------------------\n";
+    }
+
+    void eliminar_jogador(int jogador_id, int num_jogadores) {
+        // TODO: Elimina um jogador que não conseguiu uma cadeira
+        std::lock_guard<std::mutex> lock(controle_mutex);
+        if(!eliminados[jogador_id - 1]) {
+            eliminados[id - 1] = true;
+            num_jogadores--;
+        }
     }
 
     void exibir_estado(){
         // TODO: Exibe o estado atual das cadeiras e dos jogadores
-
         std::cout << "Rodada atual com " << cadeiras << " cadeiras disponíveis.\n";
     }
 
-    bool jogo_em_progresso(int jogadores_ativos) const{
-        return jogadores_ativos > 1;
+    bool jogo_ativo(int jogadores_ativos) const{
+        return jogadores_ativos > 1; //se tem mais de um entao ninguem ganhou ainda
     }
 
 private:
+    int num_jogadores;
     int cadeiras;
+    std::vector<bool> eliminados;
 };
 
 class Jogador
@@ -103,24 +116,57 @@ public:
         tentou_rodada = false;
     }
 
+    void tentar_ocupar_cadeira(){
+        // TODO: Tenta ocupar uma cadeira utilizando o semáforo contador quando a música para (aguarda pela variável de condição)
+        // if (ativo && !tentou_rodada){
+        //     tentou_rodada = true; 
+        //     verificar_eliminacao();
+        // }
+        if (ativo.load(std::memory_order_acquire) && !tentou_rodada.exchange(true, std::memory_order_acq_rel)) {
+            verificar_eliminacao();
+        }
+    }
+
+    void verificar_eliminacao(){
+        // TODO: Verifica se foi eliminado após ser destravado do semáforo
+        // if (cadeira_sem.try_acquire()){
+        //     std::cout << "[Cadeira " << numero_cadeira++ << "]: Ocupada por P" << id << "\n";
+        // } else { 
+        //     ativo = false; 
+        //     std::cout << "\nJogador P" << id << " não conseguiu uma cadeira e foi eliminado!\n";
+        //     std::cout << "----------------------------------------------------------\n";
+        // }
+        if (cadeira_sem.try_acquire()) {
+            std::lock_guard<std::mutex> cout_lock(cout_mutex);
+            std::cout << "[Cadeira " << numero_cadeira.fetch_add(1, std::memory_order_relaxed) + 1 << "]: Ocupada por P" << id << "\n";
+        } else {
+            ativo.store(false, std::memory_order_release);
+            std::lock_guard<std::mutex> cout_lock(cout_mutex);
+            std::cout << "\nJogador P" << id << " não conseguiu uma cadeira e foi eliminado!\n" << "----------------------------------------------------------\n";
+        }
+    }
+
     void joga(){
-         while (ativo && jogo_ativo.load()){  // Verifica se o jogo ainda está ativo
+        //  while (ativo && jogo_ativo.load()){  // Verifica se o jogo ainda está ativo
+        //     std::unique_lock<std::mutex> lock(music_mutex);
+        //     music_cv.wait(lock, [] { return musica_parada.load() || !jogo_ativo.load(); });
+
+        //     if (!jogo_ativo.load()) break;  // Termina a execução se o jogo acabou
+
+        //     tentar_ocupar_cadeira();
+        // }
+        while (ativo.load(std::memory_order_acquire) && 
+              jogo_ativo.load(std::memory_order_acquire)) {
+            
             std::unique_lock<std::mutex> lock(music_mutex);
-            music_cv.wait(lock, [] { return musica_parada.load() || !jogo_ativo.load(); });
+            music_cv.wait(lock, [this] { 
+                return musica_parada.load(std::memory_order_acquire) || 
+                      !jogo_ativo.load(std::memory_order_acquire); 
+            });
 
-            if (!jogo_ativo.load()) break;  // Termina a execução se o jogo acabou
+            if (!jogo_ativo.load(std::memory_order_acquire)) break;
 
-            // Tenta ocupar uma cadeira
-            if (ativo && !tentou_rodada){
-                tentou_rodada = true; 
-                if (cadeira_sem.try_acquire()){
-                    std::cout << "[Cadeira " << numero_cadeira++ << "]: Ocupada por P" << id << "\n";
-                } else { 
-                    ativo = false; 
-                    std::cout << "\nJogador P" << id << " não conseguiu uma cadeira e foi eliminado!\n";
-                    std::cout << "----------------------------------------------------------\n";
-                }
-            }
+            tentar_ocupar_cadeira();
         }
     }
 
@@ -141,7 +187,7 @@ public:
         std::mt19937 gen(rd());
         std::uniform_int_distribution<> dist(1000, 3000);
 
-        while (jogo.jogo_em_progresso(jogadores_ativos())){
+        while (jogo.jogo_ativo(jogadores_ativos())){
             std::this_thread::sleep_for(std::chrono::milliseconds(dist(gen)));
             jogo.parar_musica();
 
