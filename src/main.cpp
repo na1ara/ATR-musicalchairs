@@ -13,9 +13,10 @@ constexpr int NUM_JOGADORES = 4;
 std::counting_semaphore<NUM_JOGADORES> cadeira_sem(NUM_JOGADORES - 1); // Inicia com n-1 cadeiras, capacidade máxima n
 std::condition_variable music_cv;
 std::mutex music_mutex;
+std::mutex cout_mutex; 
 std::atomic<bool> musica_parada{false};
 std::atomic<bool> jogo_ativo{true};
-int numero_cadeira = 1; 
+std::atomic<int> numero_cadeira = 1; 
 
 /*
  * Uso básico de um counting_semaphore em C++:
@@ -78,7 +79,7 @@ public:
         // TODO: Elimina um jogador que não conseguiu uma cadeira
         std::lock_guard<std::mutex> lock(controle_mutex);
         if(!eliminados[jogador_id - 1]) {
-            eliminados[id - 1] = true;
+            eliminados[jogador_id - 1] = true;
             num_jogadores--;
         }
     }
@@ -96,6 +97,7 @@ private:
     int num_jogadores;
     int cadeiras;
     std::vector<bool> eliminados;
+    std::mutex controle_mutex;
 };
 
 class Jogador
@@ -103,6 +105,14 @@ class Jogador
 public:
     Jogador(int id)
         : id(id), ativo(true), tentou_rodada(false) {}
+        
+    // Construtor de cópia
+    Jogador(const Jogador& other)
+        : id(other.id), ativo(other.ativo.load()), tentou_rodada(other.tentou_rodada.load()) {}
+
+    // Construtor de movimentação
+    Jogador(Jogador&& other) noexcept
+        : id(other.id), ativo(other.ativo.load()), tentou_rodada(other.tentou_rodada.load()) {}
 
     bool esta_ativo() const{
         return ativo;
@@ -172,8 +182,8 @@ public:
 
 private:
     int id;
-    bool ativo;
-    bool tentou_rodada;
+    std::atomic<bool> ativo;
+    std::atomic<bool> tentou_rodada;
 };
 
 class Coordenador{
